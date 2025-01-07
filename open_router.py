@@ -1,8 +1,6 @@
-from langchain_ollama import OllamaLLM
+from openai import OpenAI
 from langchain_community.utilities import SQLDatabase
 from langchain.prompts import PromptTemplate
-from langchain.callbacks.manager import CallbackManager
-from langchain.callbacks.streaming_stdout import StreamingStdOutCallbackHandler
 from dotenv import load_dotenv
 import psycopg2
 from typing import Optional, Dict, List
@@ -27,12 +25,10 @@ class DatabaseQueryGenerator:
         self.db_password = db_password
         self.db_port = db_port
 
-        # Initialize Ollama
-        self.llm = OllamaLLM(
-            model="llama3-chatqa",
-            callbacks=[StreamingStdOutCallbackHandler()],
-            base_url="http://localhost:11434",
-            temperature=0.7
+        # Initialize OpenRouter client
+        self.client = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=os.getenv("OPENROUTER_API_KEY"),
         )
         
         self.db_url = f"postgresql+psycopg2://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
@@ -52,6 +48,7 @@ class DatabaseQueryGenerator:
             Adhere to these rules:
             - **Deliberately go through the question and database schema word by word** to appropriately answer the question
             - **ALWAYS** respond with **ONLY** the SQL query with no further elaboration, explanation, comments, or justification.
+            - Your response should always begin with "SELECT", do NOT write "sql" as the first word in your response.
             - **ALWAYS** ensure that your reponse follows standard PostgreSQL syntax.
 
             ### Input:
@@ -62,7 +59,6 @@ class DatabaseQueryGenerator:
 
             ### Response:
             Based on your instructions, here is the SQL query I have generated to answer the question `{question}`:
-            ```sql
     """
     )
 
@@ -94,17 +90,25 @@ class DatabaseQueryGenerator:
 
     def generate_query(self, question: str) -> str:
         """Generate SQL query based on the question"""
-        response = self.llm.invoke(
-            self.query_prompt.format(
-                schema=self.schema,
-                question=question
-            )
+        response = self.client.chat.completions.create(
+            model="deepseek/deepseek-chat",
+            messages=[
+                {
+                    "role": "user",
+                    "content": self.query_prompt.format(
+                        schema=self.schema,
+                        question=question
+                    )
+                }
+            ],
+            temperature=0.2
         )
 
-        response = re.sub(r'<.*?>', '', response)
-        response = response.strip().strip('`').strip()
-        response = response.replace('\u200b', '')
-        return response
+        response_content = response.choices[0].message.content
+        response_content = re.sub(r'<.*?>', '', response_content)
+        response_content = response_content.strip().strip('`').strip()
+        response_content = response_content.replace('\u200b', '')
+        return response_content
 
     def execute_query(self, query: str) -> List[Dict]:
         """Execute the generated query and return results"""
@@ -145,7 +149,7 @@ class DatabaseQueryGenerator:
 def main():
     try:
         # Load and validate environment variables
-        required_vars = ['DB_HOST', 'DB_NAME', 'DB_USER', 'DB_PASSWORD', 'DB_PORT']
+        required_vars = ['DB_HOST', 'DB_NAME', 'DB_USER', 'DB_PASSWORD', 'DB_PORT', 'OPENROUTER_API_KEY']
         missing_vars = [var for var in required_vars if not os.getenv(var)]
         
         if missing_vars:
@@ -164,8 +168,10 @@ def main():
         ]
 
         for question in questions:
-            print(f"\nQuestion: {question}\nGenerated Query:")
+            print(f"\nQuestion: {question}")
             result = generator.query_database(question)
+            print("\nGenerated Query:")
+            print(result["query"])
             print("\nResults:")
             for row in result["results"]:
                 print(row)
